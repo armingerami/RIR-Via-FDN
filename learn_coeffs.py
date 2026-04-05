@@ -73,7 +73,7 @@ locs = np.array([
     0, 4, 16, 32, 64, 128, 256, 512,
     1024, 1536, 2048, 2560, 2816, 3072, 3584, 4096,
 ], dtype=np.float32).reshape(k, 1)
-locs[-1] = max(locs[-1], target_t30-spm*20) # final delay should be at most 20 ms before t30 based on empirical tests
+locs[-1] = max(locs[-1], target_t30-spm*15) # final delay should be at most 15 ms before t30 based on empirical tests
 print("locations =", locs.reshape(-1).astype(int))
 
 # Learnable params: a[:k] = amplitude gains (beta), a[k:] per-loop decay rate (alpha)
