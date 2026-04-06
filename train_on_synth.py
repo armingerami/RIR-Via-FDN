@@ -166,7 +166,7 @@ def fit_fdn_to_rir(rir, rate=48_000, epoch_count=5000):
 
 # ── 3. Dataset Processing & Evaluation ─────────────────────────────────────────
 if __name__ == "__main__":
-    dataset = generate_pra_dataset(num_rooms=10, rate=48_000, length_samples=48_000)
+    dataset = generate_pra_dataset(num_rooms=100, rate=48_000, length_samples=48_000)
     
     # Dictionary to store the errors across all rooms
     all_errors = {
