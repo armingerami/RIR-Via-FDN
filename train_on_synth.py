@@ -118,8 +118,8 @@ def fit_fdn_to_rir(rir, rate=48_000, epoch_count=5000):
     lr_schedule = [
         lr_base,        lr_base,
         lr_base * 10,   lr_base * 10,
-        lr_base * 50,   lr_base * 100,
-        lr_base * 50,   lr_base * 50,
+        lr_base * 10,   lr_base * 10,
+        lr_base * 10,   lr_base * 10,
         lr_base * 10,   lr_base,
         lr_base * 0.1,
     ]
