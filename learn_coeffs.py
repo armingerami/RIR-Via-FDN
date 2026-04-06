@@ -97,22 +97,29 @@ times      = jnp.array(times_np,      dtype=jnp.float32)
 activation = jnp.array(activation_np, dtype=jnp.float32)
 
 # ── Model forward pass ─────────────────────────────────────────────────────────
-def synthesize_with_const_alpha(a: jnp.ndarray) -> jnp.ndarray:
+def synthesize_with_const_alpha(params: jnp.ndarray) -> jnp.ndarray:
     """Sum of k exponentially-decaying, gain-scaled ramps."""
-    decay = jnp.pow(b[k:].reshape(k, 1), times)          # (k, n)
-    y     = activation * decay * (a[:k].reshape(k, 1) ** 2)
-    return jnp.sum(y, axis=0)                             # (n,)
+    safe_times = jnp.maximum(times, 0.0)
+    weights = params[:k].reshape(k, 1)
+    decay_bases = alpha
+    decay = jnp.pow(decay_bases, safe_times)
+    y = activation * decay * (weights ** 2)                             # (n,)
 
-def synthesize_with_single_alpha(a: jnp.ndarray) -> jnp.ndarray:
+def synthesize_with_single_alpha(params: jnp.ndarray) -> jnp.ndarray:
     """Sum of k exponentially-decaying, gain-scaled ramps."""
-    decay = jnp.pow(a[0], times)          # (k, n)
-    y     = activation * decay * (a[:k].reshape(k, 1) ** 2)
-    return jnp.sum(y, axis=0)  
+    safe_times = jnp.maximum(times, 0.0)
+    weights = params[:k].reshape(k, 1)
+    decay_bases = params[0]
+    decay = jnp.pow(decay_bases, safe_times)
+    y = activation * decay * (weights ** 2)
 
-def synthesize(a: jnp.ndarray) -> jnp.ndarray:
-    """Sum of k exponentially-decaying, gain-scaled ramps."""
-    decay = jnp.pow(a[k:].reshape(k, 1), times)          # (k, n)
-    y     = activation * decay * (a[:k].reshape(k, 1) ** 2)
+def synthesize(params):
+    safe_times = jnp.maximum(times, 0.0)
+    weights = params[:k].reshape(k, 1)
+    decay_bases = params[k:].reshape(k, 1)
+    decay = jnp.pow(decay_bases, safe_times)
+    y = activation * decay * (weights ** 2)
+    
     return jnp.sum(y, axis=0)                             # (n,)
 
 # ── Loss weights ───────────────────────────────────────────────────────────────
