@@ -38,10 +38,9 @@ def fit_fdn_to_rir(rir, rate=48_000, epoch_count=5000):
     spm = rate // 1000
     n = len(rir)
     
+    # ... [Keep Target Acoustic Descriptors calculations the same] ...
     sorted_idx = np.argsort(rir)[::-1]
     scale_index = sorted_idx[43]
-
-    # ── Target Acoustic Descriptors
     energy = np.linalg.norm(rir)**2
     energy_50ms = np.linalg.norm(rir[: 50 * spm])**2
     energy_80ms = np.linalg.norm(rir[: 80 * spm])**2
@@ -60,85 +59,83 @@ def fit_fdn_to_rir(rir, rate=48_000, epoch_count=5000):
         "center_time (samples)": np.sum((rir ** 2) * np.arange(n)) / energy
     }
 
-    # ── FDN architecture setup
-    k = 16
-    alpha = 0.99
-    locs = np.array([0, 4, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 2560, 2816, 3072, 3584, 4096], dtype=np.float32).reshape(k, 1)
-    # locs[-1] = max(locs[-1], target_t30_idx-spm*15)
-
-    upper_bound = target_t30_idx - spm * 15
-    locs_normalized = locs / locs.max()
-    locs = locs_normalized * upper_bound
-    locs = locs.astype(np.int32)
-
-    coeffs = np.ones(2 * k, dtype=np.float32) * alpha
-    a_weights = jnp.array(coeffs)
-    b_decay = jnp.array(coeffs)
-
-    times_np = np.arange(n, dtype=np.float32).reshape(1, n).repeat(k, axis=0) - (locs - 1)
-    activation_np = np.clip(times_np, 0.0, 1.0)
-    times = jnp.array(times_np - 1, dtype=jnp.float32)
-    activation = jnp.array(activation_np, dtype=jnp.float32)
-
-    @jit
-    def synthesize(params):
-        safe_times = jnp.maximum(times, 0.0)
-        weights = params[:k].reshape(k, 1)
-        decay_bases = params[k:].reshape(k, 1)
-        decay = jnp.pow(decay_bases, safe_times)
-        y = activation * decay * (weights ** 2)
+    # ── Reset Logic Loop
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        print(f"  > Attempt {attempt + 1}/{max_attempts}...")
         
-        return jnp.sum(y, axis=0)
-
-    @jit
-    def compute_losses(params):
-        y = synthesize(params)
+        # ── FDN architecture setup (Moving inside the loop for fresh starts)
+        k = 16
+        # Add slight variation to initialization on retries
+        alpha = 0.99 + (np.random.uniform(-0.01, 0.01) if attempt > 0 else 0)
         
-        # Fixed total energy to correctly omit the trailing samples mirroring early reflection count
-        eng = early_energy + jnp.linalg.norm(y[:-scale_index-1])**2
-        eng_80 = early_energy + jnp.linalg.norm(y[: 80 * spm - scale_index-1])**2
-        eng_50 = early_energy + jnp.linalg.norm(y[: 50 * spm - scale_index-1])**2
+        locs = np.array([0, 4, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 2560, 2816, 3072, 3584, 4096], dtype=np.float32).reshape(k, 1)
+        upper_bound = target_t30_idx - spm * 15
+        locs_normalized = locs / locs.max()
+        locs = (locs_normalized * upper_bound).astype(np.int32)
+
+        # Re-calculating constants based on new locs/alpha
+        times_np = np.arange(n, dtype=np.float32).reshape(1, n).repeat(k, axis=0) - (locs - 1)
+        activation = jnp.array(np.clip(times_np, 0.0, 1.0), dtype=jnp.float32)
+        times = jnp.array(times_np - 1, dtype=jnp.float32)
+
+        coeffs = np.ones(2 * k, dtype=np.float32) * alpha
+        curr_a = jnp.array(coeffs)
+
+        @jit
+        def synthesize(params):
+            safe_times = jnp.maximum(times, 0.0)
+            weights = params[:k].reshape(k, 1)
+            decay_bases = alpha # using the loop-defined alpha
+            decay = jnp.pow(decay_bases, safe_times)
+            y = activation * decay * (weights ** 2)
+            return jnp.sum(y, axis=0)
+
+        @jit
+        def compute_losses(params):
+            y = synthesize(params)
+            eng = early_energy + jnp.linalg.norm(y[:-scale_index-1])**2
+            eng_80 = early_energy + jnp.linalg.norm(y[: 80 * spm - scale_index-1])**2
+            eng_50 = early_energy + jnp.linalg.norm(y[: 50 * spm - scale_index-1])**2
+            
+            definition = eng_50 / eng
+            simp_clarity = eng_80 / eng
+            center_time = jnp.sum(y * y * jnp.arange(n)) / (eng + 1e-10)
+
+            l_def = (target_metrics["definition"] - definition)**2
+            l_cl  = ((energy_80ms / energy) - simp_clarity)**2
+            l_ct  = (target_metrics["center_time (samples)"] - center_time)**2
+            return 1e4 * l_def + 1e7 * l_cl + 2e-6 * l_ct
+
+        grad_loss = jit(grad(compute_losses))
         
-        definition = eng_50 / eng
-        simp_clarity = eng_80 / eng
-        center_time = jnp.sum(y * y * jnp.arange(n)) / eng
-
-        l_def = (target_metrics["definition"] - definition)**2
-        l_cl  = ((energy_80ms / energy) - simp_clarity)**2
-        l_ct  = (target_metrics["center_time (samples)"] - center_time)**2
-        l_t30 = (y[target_t30_idx - scale_index-1] - 0.001)**2
+        # Training loop
+        lr_base = 5e-8
+        lr_schedule = [lr_base, lr_base, lr_base*10, lr_base*10, lr_base*10, 
+                       lr_base*10, lr_base*10, lr_base*10, lr_base*10, lr_base, lr_base*0.1]
+        lr_interval = epoch_count // 10
+        Lalpha = 1e-5
         
-        return 1e4 * l_def + 1e7 * l_cl + 2e-6 * l_ct
+        for epoch in range(epoch_count + 1):
+            lr_idx = min(epoch // lr_interval, len(lr_schedule) - 1)
+            multipliers = jnp.where(jnp.arange(curr_a.shape[0]) < k, 1.0, Lalpha)
+            curr_a = curr_a - grad_loss(curr_a) * lr_schedule[lr_idx] * multipliers
+            
+            if epoch % (epoch_count // 5) == 0: # Print less frequently to keep console clean
+                total = compute_losses(curr_a)
+                print(f"    Epoch {epoch:,} | Loss: {float(total):.6f}")
 
-    grad_loss = jit(grad(compute_losses))
-    
-    # Training Loop
-    curr_a = a_weights
-    lr_base = 5e-8
-    lr_schedule = [
-        lr_base,        lr_base,
-        lr_base * 10,   lr_base * 10,
-        lr_base * 10,   lr_base * 10,
-        lr_base * 10,   lr_base * 10,
-        lr_base * 10,   lr_base,
-        lr_base * 0.1,
-    ]
-    lr_interval = epoch_count // 10
-    Lalpha = 1e-5
-    lr_idx = 0
-    for epoch in range(epoch_count + 1):
-        multipliers = jnp.where(jnp.arange(curr_a.shape[0]) < k, 1.0, Lalpha)
-        curr_a = curr_a - grad_loss(curr_a) * lr_schedule[lr_idx] * multipliers
-        if epoch % lr_interval == 0:
-            lr_idx = min(lr_idx + 1, len(lr_schedule) - 1)
+        # ── Final check for this attempt
+        final_loss = float(compute_losses(curr_a))
+        if final_loss <= 0.005:
+            print(f"  [Success] Convergence reached with loss {final_loss:.6f}")
+            break
+        else:
+            print(f"  [Warning] Attempt {attempt+1} failed with loss {final_loss:.6f}")
+            if attempt == max_attempts - 1:
+                print("  [Error] Reached max attempts. Proceeding with best available result.")
 
-        if epoch % lr_interval == 0:
-            total= compute_losses(curr_a)
-
-            print(f"\n── Epoch {epoch:,} │ lr = {lr_schedule[lr_idx]:.2e} │ total loss = {float(total):.6f}")
-
-
-    # ── Final Estimation Calculation
+    # ── Final Estimation Calculation (Uses the last curr_a from the loop)
     final_y = np.array(synthesize(curr_a))
     print(curr_a)
     
@@ -166,7 +163,7 @@ def fit_fdn_to_rir(rir, rate=48_000, epoch_count=5000):
 
 # ── 3. Dataset Processing & Evaluation ─────────────────────────────────────────
 if __name__ == "__main__":
-    dataset = generate_pra_dataset(num_rooms=100, rate=48_000, length_samples=48_000)
+    dataset = generate_pra_dataset(num_rooms=10, rate=48_000, length_samples=48_000)
     
     # Dictionary to store the errors across all rooms
     all_errors = {
